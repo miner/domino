@@ -57,11 +57,11 @@
 ;;; returns canonical lo <= hi
 (defn mkdom [a b]
   (assert (and (<= 0 a 12) (<= 0 b 12)))
-  (bit-or (bit-shift-left (max a b) 8)
-          (min a b)))
+  (bit-or (bit-shift-left (min a b) 8)
+          (max a b)))
 
 (defn pipv [d]
-  [(pips d) (pips2 d)])
+  [(pips2 d) (pips d)])
 
 
 ;;; Game state
