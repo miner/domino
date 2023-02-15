@@ -12,19 +12,19 @@
 ;;; Using a domino in reverse canonical order shouldn't be an issue.  Just keep track of
 ;;; tail number for matching and maybe unordered bag of used tiles for stats.
 
-(defn lo-pips [d]
-  (bit-shift-right d 8))
-
-(defn hi-pips [d]
+(defn pips [d]
   (bit-and d 0xFF))
 
+(defn pips2 [d]
+  (bit-shift-right d 8))
+
 (defn dub-pips [d]
-  (let [hi (hi-pips d)]
-    (when (= (lo-pips d) hi)
-      hi)))
+  (let [p (pips d)]
+    (when (= (pips2 d) p)
+      p)))
 
 (defn total-pips [d]
-  (+ (lo-pips d) (hi-pips d)))
+  (+ (pips d) (pips2 d)))
 
 ;; double-blank is worth 50 
 (defn score-pips [d]
@@ -42,7 +42,7 @@
 
 
 (defn dom-str [dom]
-  (str (lo-pips dom) ":" (hi-pips dom)))
+  (str (pips2 dom) ":" (pips dom)))
 
 (defn hand-str [doms]
   (clojure.string/join ", " (map dom-str (sort doms))))
@@ -61,7 +61,7 @@
           (min a b)))
 
 (defn pipv [d]
-  [(lo-pips d) (hi-pips d)])
+  [(pips d) (pips2 d)])
 
 
 ;;; Game state
@@ -98,6 +98,7 @@
     {:high-pips high
      :start nil
      :next-player 1
+     :unsatisfied nil
      :winner nil
      :num-players num-players
      :bone-yard bone-yard
@@ -105,6 +106,10 @@
      :public (into [] (repeat (inc num-players) false))
      :train (into [] (repeat (inc num-players) []))
      :hand hands})))
+
+;;; Not sure we need :start as tails will be set to it
+;;; Maybe submap of :initial-data that never changes ???
+;;; hands are just seqs for now.  Probably will need indexes later for searching.
 
 (defn next-player [game]
   (let [nxt (inc (:next-player game))]
@@ -121,20 +126,18 @@
       (let [draw (peek (:bone-yard game))]
         (if-let [start (dub-pips draw)]
           (-> game (update :bone-yard pop)
-              (assoc :start start)
-              (assoc :tail (vec (repeat (inc (:num-players game)) start))))
+              (assoc :start start))
           ;; failed to start, let next player try
           (-> game (next-player game)
               (update :bone-yard pop)
               (update-in [:hand player] conj draw))))
-      (let [start (hi-pips hi-dub)]
+      (let [start (pips hi-dub)]
         (-> game
             (update-in [:hand player] remove-dom hi-dub)
-            (assoc :tail (vec (repeat (inc (:num-players game)) start)))
             (assoc :start start))))))
 
 (defn print-game [game]
-  (println "Next" (:next-player game) " start:" (:start game))
+  (println "Next" (:next-player game) " start:" (:start game) " unsat:" (:unsatisfied game))
   (dotimes [i (:num-players game)]
     (print i (nth (:tail game) i))
     (when (nth (:public game) i) (print "*"))
@@ -143,7 +146,43 @@
   (println "Bone yard:" (bone-str (:bone-yard game)))
   (println))
 
+
+(defn initial-train [game player]
+  ;; UNFINISHED
+  game)
+
+(defn satisfy [game player unsat-train]
+  (let [targ (nth (:tail game) unsat-train)]
+    ;; find a tile matching targ
+    ;; play it on that train
+    ;; or draw, maybe play or give up
+    ;; on to next player
+    ;; UNFINISHED
+    game))
+
+(defn normal-play [game player]
+  (let [possible-trains (into #{player} (filter (:public game))
+                              (range (inc (:num-players game))))
+        possible-tails nil]
+    ;; UNFINISHED
+    ;; pick best tile to play on best train
+    ;; or draw if no
+
+    ))
     
+
+
+(defn run-game []
+  (loop [game (loop [g (init-game 4)] (if (:start g) g (find-start g)))]
+    (if (:winner game)
+      game
+      (let [p (:next-player game)]
+        (if-let [unsat (:unsatisfied game)]
+          (satisfy game p unsat)
+          (if (nil? (nth (:tail game) p))
+            (initial-train game p)
+            (normal-play game p)))))))
+            
 
 
 (defn make-train [train hand]
