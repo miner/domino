@@ -64,6 +64,13 @@
   [(pips2 d) (pips d)])
 
 
+(defn extending [n d]
+  (let [p (pips d)
+        p2 (pips2 d)]
+    (cond (= n p) p2
+          (= n p2) p
+          :else nil)))
+
 ;;; Game state
 
 ;;; Mexican train = 0, other players are 1 to N in rotational order
