@@ -12,6 +12,7 @@
 ;;; Using a domino in reverse canonical order shouldn't be an issue.  Just keep track of
 ;;; tail number for matching and maybe unordered bag of used tiles for stats.
 
+
 (defn pips [d]
   (bit-and d 0xFF))
 
@@ -23,6 +24,19 @@
     (when (= (pips2 d) p)
       p)))
 
+(defn opips [d n]
+  (condp = n
+    (pips d) (pips2 d)
+    (pips2 d) (pips d)
+    nil))
+            
+#_ slower
+(defn opp-pips [d n]
+  (cond (= (pips d) n) (pips2 d)
+        (= (pips2 d) n) (pips d)
+        :else nil))
+
+
 (defn total-pips [d]
   (+ (pips d) (pips2 d)))
 
@@ -32,6 +46,10 @@
     (if (pos? tot)
       tot
       50)))
+
+
+(defn count-dominoes [high]
+  (/ (* (inc (inc high)) (inc high)) 2))
 
 ;; high is normally 6 or 12 pips
 (defn gen-domino-ints [high]
@@ -50,20 +68,20 @@
 (defn bone-str [doms]
   (str "[" (clojure.string/join ", " (map dom-str doms)) "]"))
 
-(defn count-dominoes [high]
-  (/ (* (inc (inc high)) (inc high)) 2))
 
 
 ;;; returns canonical lo <= hi
-(defn mkdom [a b]
-  (assert (and (<= 0 a 12) (<= 0 b 12)))
-  (bit-or (bit-shift-left (min a b) 8)
-          (max a b)))
+(defn dom
+  ([[a b]] (dom a b))
+  ([a b] 
+   (assert (and (<= 0 a 12) (<= 0 b 12)))
+   (bit-or (bit-shift-left (min a b) 8)
+           (max a b))))
 
 (defn pipv [d]
   [(pips2 d) (pips d)])
 
-
+#_   ;; drop this
 (defn extending [n d]
   (let [p (pips d)
         p2 (pips2 d)]
@@ -77,46 +95,97 @@
 ;;; player turn: one of 1 ... N
 ;;; next-starter: player-id
 ;;; winner: player-id
-;;; hands array [0...N] of hand [doms...]
-;;; bone-yard: vector of shuffled doms in (hands 0).  Players 1...N
+;;; player-states vector [0...N] of player-state, 0 nil maybe used for something else
+;;; bone-yard: vector of shuffled doms
 
-;;; :tail [0..N] int
-;;; :public [0..N] bool
-;;; :train [0..N]  [doms...]
+;;; player-state is map
+;;; :player N
+;;; :public T/F
+;;; :unsatisfied T/F
+;;; :train  [START]   later, [START start pips pips x x y ...]
+;;;    vector, START comes from game initial DOUBLE
+;;;    peek is pips to match
+;;;    every two pips is from a domino played
+;;;    test for doubles as necessary
+
+
+;;; SEM NEW IDEA:  train should be vector of pips,  start with initial double, then add two
+;;; pips per domino so peek always is the next to match.  Double ending is easy to check.
+;;; Don't have to keep separate :tail
+;;;
+;;; also better to keep all player info within hand map of 0..N to doms (double entry map).
+;;; Just add non-int keys for :player N, :public true/false, :unsatisfied true/false within
+;;; same map.
+;;;
+;;; Finding initial train is loop of trying to add dom, by end, adding one each to train
+;;; into working set and keep adding until you can't, then move stat to `finished` list.  At
+;;; end take longest train (non-double if tied)
+
+;;; Need to check rules on initial train with unsatisfied double
+;;; Need to check how many extra trains allowed -- Reeds limit to 8 total (including
+;;; privates), my rules had max 1 extra.
+
+
+
 
 ;;; when center C:C is established all trains are initialized with tail C
 
+(defn draw [game player]
+  ;; take from bone yard
+  ;; play it if possible
+  ;; add to hand
+  ;; UNIMPLEMENTED
+  )
 
+(defn empty-hand [high]
+  (assoc (zipmap (range (inc high))
+                 (repeat #{}))
+         :train []
+         :public false
+         :unsatisfied false))
+
+(defn dom-conj [hand domino]
+  (-> hand
+      (update (pips domino) conj domino)
+      (update (pips2 domino) conj domino)))
+
+(defn dom-disj [hand domino]
+  (-> hand
+      (update (pips domino) disj domino)
+      (update (pips2 domino) disj domino)))
+      
 
 (defn init-game
   ([] (init-game 4))
   ([num-players]
-  (assert (> num-players 1))
-  (let [high 6 ;;later 12
-        hand-size 4 ;;later 15
-        all-doms (gen-domino-ints high)
-        count-doms (count all-doms)
-        shuffled (shuffle all-doms)
-        to-be-dealt (* num-players hand-size)
-        _ (assert (< to-be-dealt count-doms))
-        bone-yard (vec (take (- count-doms to-be-dealt) shuffled))
-        hands (into [nil] (comp (drop (count bone-yard)) (partition-all hand-size))
-                    shuffled)]
-    {:high-pips high
-     :start nil
-     :next-player 1
-     :unsatisfied nil
-     :winner nil
-     :num-players num-players
-     :bone-yard bone-yard
-     :tail (into [] (repeat (inc num-players) nil))
-     :public (into [] (repeat (inc num-players) false))
-     :train (into [] (repeat (inc num-players) []))
-     :hand hands})))
+   (assert (> num-players 1))
+   (let [high 6 ;;later 12
+         hand-size 4 ;;later 15
+         all-doms (gen-domino-ints high)
+         count-doms (count all-doms)
+         shuffled (shuffle all-doms)
+         to-be-dealt (* num-players hand-size)
+         _ (assert (< to-be-dealt count-doms))
+         bone-yard (vec (drop to-be-dealt shuffled))
+         hands (sequence (comp (take to-be-dealt)
+                               (partition-all hand-size)
+                               (map #(reduce dom-conj (empty-hand high) %)))
+                         shuffled)
+         players (into [nil] (map #(assoc % :player %2) hands (range 1 (inc num-players))))]
+     {:high-pips high
+      :start nil
+      :next-player 1
+      :unsatisfied nil
+      :winner nil
+      :num-players num-players
+      :bone-yard bone-yard
+      :players players})))
 
 ;;; Not sure we need :start as tails will be set to it
-;;; Maybe submap of :initial-data that never changes ???
-;;; hands are just seqs for now.  Probably will need indexes later for searching.
+
+
+(defn max-double [hand high]
+  (first (keep dub-pips (mapcat hand (range high -1 -1)))))
 
 (defn next-player [game]
   (let [nxt (inc (:next-player game))]
@@ -154,9 +223,30 @@
   (println))
 
 
-(defn initial-train [game player]
-  ;; UNFINISHED
-  game)
+;;; maybe start should have been pre-inserted in :train so you don't have to do it here?
+;;; maybe doms need to be sorted so you get most pips in initial train?
+;;; probably shouldn't end in a double, or maybe that's a strategy?  Would have to draw
+;;; immediately!
+
+(defn grow-initial-train [player-state start]
+  (let [fin? (fn [st] (empty? (get st (peek (:train st)))))
+        expand-st (fn [st]
+                    (let [end (peek (:train st))
+                          doms (get st end)]
+                      (map (fn [dom]
+                             (-> st
+                                 (update (pips dom) disj dom)
+                                 (update (pips2 dom) disj dom)
+                                 (update :train conj end (opips dom end))))
+                           doms)))]
+    (loop [working [(assoc player-state :train [start])] finished nil]
+      (let [finished1 (into finished (filter fin?) working)
+            working1 (mapcat expand-st (remove fin? working))]
+        (if (empty? working1)
+          (apply max-key #(count (:train %)) finished1)
+          (recur working1 finished1))))))
+
+  
 
 (defn satisfy [game player unsat-train]
   (let [targ (nth (:tail game) unsat-train)]
