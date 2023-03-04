@@ -62,8 +62,10 @@
 (defn dom-str [dom]
   (str (pips2 dom) ":" (pips dom)))
 
-(defn hand-str [doms]
-  (clojure.string/join ", " (map dom-str (sort doms))))
+;;; FIXME inefficient
+(defn hand-str [hand]
+  (let [doms (into #{} (mapcat #(get hand %)) (range 13))]
+    (clojure.string/join ", " (map dom-str (sort doms)))))
 
 (defn bone-str [doms]
   (str "[" (clojure.string/join ", " (map dom-str doms)) "]"))
@@ -93,7 +95,7 @@
 
 ;;; Mexican train = 0, other players are 1 to N in rotational order
 ;;; player turn: one of 1 ... N
-;;; next-starter: player-id
+;;; next-player: player-id
 ;;; winner: player-id
 ;;; player-states vector [0...N] of player-state, 0 nil maybe used for something else
 ;;; bone-yard: vector of shuffled doms
@@ -102,8 +104,8 @@
 ;;; :player N
 ;;; :public T/F
 ;;; :unsatisfied T/F
-;;; :train  [START]   later, [START start pips pips x x y ...]
-;;;    vector, START comes from game initial DOUBLE
+;;; :train  [ENGINE]   later, [ENGINE engine pips pips x x y ...]
+;;;    vector, ENGINE comes from game initial DOUBLE
 ;;;    peek is pips to match
 ;;;    every two pips is from a domino played
 ;;;    test for doubles as necessary
@@ -159,8 +161,8 @@
   ([] (init-game 4))
   ([num-players]
    (assert (> num-players 1))
-   (let [high 6 ;;later 12
-         hand-size 4 ;;later 15
+   (let [high 12
+         hand-size 15
          all-doms (gen-domino-ints high)
          count-doms (count all-doms)
          shuffled (shuffle all-doms)
@@ -171,9 +173,10 @@
                                (partition-all hand-size)
                                (map #(reduce dom-conj (empty-hand high) %)))
                          shuffled)
-         players (into [nil] (map #(assoc % :player %2) hands (range 1 (inc num-players))))]
+         players (into [{:player 0 :name :mexican :public true :unsatisifed false :train []}]
+                       (map #(assoc % :player %2) hands (range 1 (inc num-players))))]
      {:high-pips high
-      :start nil
+      :engine nil
       :next-player 1
       :unsatisfied nil
       :winner nil
@@ -181,11 +184,43 @@
       :bone-yard bone-yard
       :players players})))
 
-;;; Not sure we need :start as tails will be set to it
 
 
+(defn hand-doms [player-state]
+  (sort (map pipv (into #{} (mapcat player-state) (range 13)))))
+  
 (defn max-double [hand high]
   (first (keep dub-pips (mapcat hand (range high -1 -1)))))
+
+
+(defn init-trains [game engine]
+  (assoc game :players (mapv (fn [hand] (assoc hand :train [engine])) (:players game))))
+
+;;; player 0 is the mexican train, 1-N are normal players
+(defn inc-next-player [game]
+  (let [nxt (inc (:next-player game))]
+    (assoc game :next-player (if (<= nxt (:num-players game)) nxt 1))))
+
+(defn assign-engine [game]
+  (let [player (:next-player game)]
+    (if-let [max-dub (max-double ((:players game) player) (:high-pips game))]
+      (-> game
+          (assoc :engine max-dub)
+          (update-in [:players player] dom-disj (dom max-dub max-dub))
+          (init-trains max-dub))
+      (let [draw (peek (:bone-yard game))]
+        (if (dub-pips draw)
+          (-> game
+              (assoc :engine draw)
+              (update :bone-yard pop)
+              (init-trains draw))
+          (recur (-> game
+                     (update :bone-yard pop)
+                     (assoc-in [:players player] dom-conj draw)
+                     (inc-next-player))))))))
+          
+      
+
 
 (defn next-player [game]
   (let [nxt (inc (:next-player game))]
@@ -194,7 +229,9 @@
 (defn remove-dom [hand dom]
   (remove #(= % dom) hand))
 
-(defn find-start [game]
+;; "The engine" is the starting doubles
+#_
+(defn find-engine [game]
   (let [player (:next-player game)
         ;; tricky -- double pips sort same as single pips, not true in general as lo-pips dominate
         hi-dub (reduce max -1 (filter dub-pips (nth (:hand game) player)))]
@@ -202,7 +239,7 @@
       (let [draw (peek (:bone-yard game))]
         (if-let [start (dub-pips draw)]
           (-> game (update :bone-yard pop)
-              (assoc :start start))
+              (assoc :engine start))
           ;; failed to start, let next player try
           (-> game (next-player game)
               (update :bone-yard pop)
@@ -210,14 +247,14 @@
       (let [start (pips hi-dub)]
         (-> game
             (update-in [:hand player] remove-dom hi-dub)
-            (assoc :start start))))))
+            (assoc :engine start))))))
 
 (defn print-game [game]
-  (println "Next" (:next-player game) " start:" (:start game) " unsat:" (:unsatisfied game))
-  (dotimes [i (:num-players game)]
+  (println "Next" (:next-player game) " start:" (:engine game) " unsat:" (:unsatisfied game))
+  (dotimes [i (inc (:num-players game))]
     (print i (nth (:tail game) i))
     (when (nth (:public game) i) (print "*"))
-    (when (pos? i) (print "; hand:" (hand-str (nth (:hand game) i))))
+    (when (pos? i) (print "; hand:" (hand-str (nth (:players game) i))))
     (println))
   (println "Bone yard:" (bone-str (:bone-yard game)))
   (println))
@@ -270,7 +307,7 @@
 
 
 (defn run-game []
-  (loop [game (loop [g (init-game 4)] (if (:start g) g (find-start g)))]
+  (loop [game (loop [g (init-game 4)] (if (:engine g) g (find-start g)))]
     (if (:winner game)
       game
       (let [p (:next-player game)]
@@ -301,6 +338,10 @@
      (if (> width len)
        (str (subs "0000000000000000" 0 (- width len)) hs)
        hs))))
+
+
+
+
 
 
 ;;; ----------------------------------------------------------------------
