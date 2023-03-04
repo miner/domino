@@ -211,9 +211,9 @@
       (let [draw (peek (:bone-yard game))]
         (if (dub-pips draw)
           (-> game
-              (assoc :engine draw)
+              (assoc :engine (pips draw))
               (update :bone-yard pop)
-              (init-trains draw))
+              (init-trains (pips draw)))
           (recur (-> game
                      (update :bone-yard pop)
                      (assoc-in [:players player] dom-conj draw)
@@ -250,10 +250,10 @@
             (assoc :engine start))))))
 
 (defn print-game [game]
-  (println "Next" (:next-player game) " start:" (:engine game) " unsat:" (:unsatisfied game))
+  (println "Next" (:next-player game) " engine:" (:engine game) " unsat:" (:unsatisfied game))
   (dotimes [i (inc (:num-players game))]
-    (print i (nth (:tail game) i))
-    (when (nth (:public game) i) (print "*"))
+    (print i (get-in game [:players i :train]))
+    (when (get-in game [:players i :public]) (print "*"))
     (when (pos? i) (print "; hand:" (hand-str (nth (:players game) i))))
     (println))
   (println "Bone yard:" (bone-str (:bone-yard game)))
