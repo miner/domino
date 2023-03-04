@@ -216,7 +216,7 @@
               (init-trains (pips draw)))
           (recur (-> game
                      (update :bone-yard pop)
-                     (assoc-in [:players player] dom-conj draw)
+                     (update-in [:players player] dom-conj draw)
                      (inc-next-player))))))))
           
       
