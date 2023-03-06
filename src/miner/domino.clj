@@ -83,22 +83,17 @@
 (defn pipv [d]
   [(pips2 d) (pips d)])
 
-#_   ;; drop this
-(defn extending [n d]
-  (let [p (pips d)
-        p2 (pips2 d)]
-    (cond (= n p) p2
-          (= n p2) p
-          :else nil)))
 
 ;;; Game state
 
-;;; Mexican train = 0, other players are 1 to N in rotational order
+;;; Mexican train = :mexican, other players are 1 to N in rotational order
 ;;; player turn: one of 1 ... N
 ;;; next-player: player-id
 ;;; winner: player-id
-;;; player-states vector [0...N] of player-state, 0 nil maybe used for something else
-;;; bone-yard: vector of shuffled doms
+;;; bone-yard: vector of shuffled doms  (peek/pop to draw)
+;;; player states are keys 1 .. N => maps of players
+;;; :mexican key for mexican train (like player state without map of doms, just train)
+
 
 ;;; player-state is map
 ;;; :player N
@@ -109,11 +104,11 @@
 ;;;    peek is pips to match
 ;;;    every two pips is from a domino played
 ;;;    test for doubles as necessary
+;;; plus N keys mapping to set of dominoes that have that pip number -- so every domino (except
+;;; doubles) maps to two keys N and M for the two pips.
 
-
-;;; SEM NEW IDEA:  train should be vector of pips,  start with initial double, then add two
+;;; :train is a vector of pips,  start with initial double or "engine", then add two
 ;;; pips per domino so peek always is the next to match.  Double ending is easy to check.
-;;; Don't have to keep separate :tail
 ;;;
 ;;; also better to keep all player info within hand map of 0..N to doms (double entry map).
 ;;; Just add non-int keys for :player N, :public true/false, :unsatisfied true/false within
@@ -124,25 +119,36 @@
 ;;; end take longest train (non-double if tied)
 
 ;;; Need to check rules on initial train with unsatisfied double
-;;; Need to check how many extra trains allowed -- Reeds limit to 8 total (including
-;;; privates), my rules had max 1 extra.
+
+;;; Exactly one Mexican train is allowed.
 
 
+;;; For initial multi-tile turn, we should encode by leaving it nil until you have a chance
+;;; to start.  Then at that point, copy init train from :mexican.  So init assignment is
+;;; only for :mexican as well.  This will let a player who is forced to satisfy someone's
+;;; double to still have an initial turn.
+
+;;; FIXME question:  if you can't start a train, you have to draw.  Then can you still start
+;;; multi-tile train or can you just play that one tile?  If you draw and still stuck, can
+;;; you later do a multi-tile train or is that chance lost?
+
+;;; For now, I'm saying if you draw, you can only play that one tile.  And you never get another
+;;; chance to start multi-train -- except if you're forced to satisfy someone else's double.
 
 
-;;; when center C:C is established all trains are initialized with tail C
+;;; when center "engine" C:C is established all trains are initialized with tail C
+;;; We use the :mexican :train as the standard
 
-(defn draw [game player]
-  ;; take from bone yard
-  ;; play it if possible
-  ;; add to hand
-  ;; UNIMPLEMENTED
-  )
+(defn engine [game]
+  (get-in game [:mexican :train 0]))
+
+
+;; "hand" is my old term for "player"
 
 (defn empty-hand [high]
   (assoc (zipmap (range (inc high))
                  (repeat #{}))
-         :train []
+         :train nil
          :public false
          :unsatisfied false))
 
@@ -162,27 +168,28 @@
   ([num-players]
    (assert (> num-players 1))
    (let [high 12
-         hand-size 15
          all-doms (gen-domino-ints high)
          count-doms (count all-doms)
+         hand-size (long (/ (* 0.7 count-doms) num-players))
          shuffled (shuffle all-doms)
          to-be-dealt (* num-players hand-size)
          _ (assert (< to-be-dealt count-doms))
          bone-yard (vec (drop to-be-dealt shuffled))
          hands (sequence (comp (take to-be-dealt)
-                               (partition-all hand-size)
-                               (map #(reduce dom-conj (empty-hand high) %)))
+                               (partition-all hand-size))
                          shuffled)
-         players (into [{:player 0 :name :mexican :public true :unsatisifed false :train []}]
-                       (map #(assoc % :player %2) hands (range 1 (inc num-players))))]
-     {:high-pips high
-      :engine nil
-      :next-player 1
-      :unsatisfied nil
-      :winner nil
-      :num-players num-players
-      :bone-yard bone-yard
-      :players players})))
+         players (mapv #(reduce dom-conj (empty-hand high) %) hands)]
+
+     (reduce (fn [st n] (assoc-in st [n :player] n))
+             (merge (zipmap (range 1 (inc num-players)) players)
+                    {:mexican {:player :mexican :public true :unsatisifed false :train nil}
+                     :high-pips high
+                     :next-player 1
+                     :unsatisfied nil
+                     :winner nil
+                     :num-players num-players
+                     :bone-yard bone-yard})
+             (range 1 (inc num-players))))))
 
 
 
@@ -192,69 +199,35 @@
 (defn max-double [hand high]
   (first (keep dub-pips (mapcat hand (range high -1 -1)))))
 
-
-(defn init-trains [game engine]
-  (assoc game :players (mapv (fn [hand] (assoc hand :train [engine])) (:players game))))
-
 ;;; player 0 is the mexican train, 1-N are normal players
 (defn inc-next-player [game]
   (let [nxt (inc (:next-player game))]
     (assoc game :next-player (if (<= nxt (:num-players game)) nxt 1))))
 
+;; "The engine" is the starting doubles
 (defn assign-engine [game]
   (let [player (:next-player game)]
-    (if-let [max-dub (max-double ((:players game) player) (:high-pips game))]
+    (if-let [max-dub (max-double (get game player) (:high-pips game))]
       (-> game
-          (assoc :engine max-dub)
-          (update-in [:players player] dom-disj (dom max-dub max-dub))
-          (init-trains max-dub))
+          (update player dom-disj (dom max-dub max-dub))
+          (assoc-in [:mexican :train] [max-dub]))
       (let [draw (peek (:bone-yard game))]
         (if (dub-pips draw)
           (-> game
-              (assoc :engine (pips draw))
               (update :bone-yard pop)
-              (init-trains (pips draw)))
+              (assoc-in [:mexican :train] [(pips draw)]))
           (recur (-> game
                      (update :bone-yard pop)
-                     (update-in [:players player] dom-conj draw)
+                     (update player dom-conj draw)
                      (inc-next-player))))))))
-          
-      
 
-
-(defn next-player [game]
-  (let [nxt (inc (:next-player game))]
-    (assoc game :next-player (if (> nxt (:num-players game)) 1 nxt))))
-
-(defn remove-dom [hand dom]
-  (remove #(= % dom) hand))
-
-;; "The engine" is the starting doubles
-#_
-(defn find-engine [game]
-  (let [player (:next-player game)
-        ;; tricky -- double pips sort same as single pips, not true in general as lo-pips dominate
-        hi-dub (reduce max -1 (filter dub-pips (nth (:hand game) player)))]
-    (if (neg? hi-dub)
-      (let [draw (peek (:bone-yard game))]
-        (if-let [start (dub-pips draw)]
-          (-> game (update :bone-yard pop)
-              (assoc :engine start))
-          ;; failed to start, let next player try
-          (-> game (next-player game)
-              (update :bone-yard pop)
-              (update-in [:hand player] conj draw))))
-      (let [start (pips hi-dub)]
-        (-> game
-            (update-in [:hand player] remove-dom hi-dub)
-            (assoc :engine start))))))
 
 (defn print-game [game]
-  (println "Next" (:next-player game) " engine:" (:engine game) " unsat:" (:unsatisfied game))
-  (dotimes [i (inc (:num-players game))]
-    (print i (get-in game [:players i :train]))
-    (when (get-in game [:players i :public]) (print "*"))
-    (when (pos? i) (print "; hand:" (hand-str (nth (:players game) i))))
+  (println "Next" (:next-player game) " engine:" (get-in game [:mexican :train 0]) " unsat:" (:unsatisfied game))
+  (doseq [i (conj (range 1 (inc (:num-players game))) :mexican)]
+    (print i (get-in game [i :train]))
+    (when (get-in game [i :public]) (print "*"))
+    (when (and (not= i :mexican) (pos? i)) (print "; hand:" (hand-str (get game i))))
     (println))
   (println "Bone yard:" (bone-str (:bone-yard game)))
   (println))
@@ -265,7 +238,7 @@
 ;;; probably shouldn't end in a double, or maybe that's a strategy?  Would have to draw
 ;;; immediately!
 
-(defn grow-initial-train [player-state start]
+(defn grow-initial-train [player-state engine]
   (let [fin? (fn [st] (empty? (get st (peek (:train st)))))
         expand-st (fn [st]
                     (let [end (peek (:train st))
@@ -276,7 +249,7 @@
                                  (update (pips2 dom) disj dom)
                                  (update :train conj end (opips dom end))))
                            doms)))]
-    (loop [working [(assoc player-state :train [start])] finished nil]
+    (loop [working [(assoc player-state :train [engine])] finished nil]
       (let [finished1 (into finished (filter fin?) working)
             working1 (mapcat expand-st (remove fin? working))]
         (if (empty? working1)
@@ -305,9 +278,8 @@
     ))
     
 
-
 (defn run-game []
-  (loop [game (loop [g (init-game 4)] (if (:engine g) g (find-start g)))]
+  (loop [game (loop [g (init-game 4)] (if (engine g) g (find-start g)))]
     (if (:winner game)
       game
       (let [p (:next-player game)]
