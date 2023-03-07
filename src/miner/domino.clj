@@ -24,6 +24,9 @@
     (when (= (pips2 d) p)
       p)))
 
+(defn match-pips [p d]
+  (or (= p (pips d)) (= p (pips2 d))))
+
 (defn opips [d n]
   (condp = n
     (pips d) (pips2 d)
@@ -195,7 +198,10 @@
 
 (defn hand-doms [player-state]
   (sort (map pipv (into #{} (mapcat player-state) (range 13)))))
-  
+
+(defn hand-pips [player-state]
+  (reduce + 0 (map score-pips (into #{} (mapcat player-state) (range 13)))))
+
 (defn max-double [hand high]
   (first (keep dub-pips (mapcat hand (range high -1 -1)))))
 
@@ -238,7 +244,7 @@
 ;;; probably shouldn't end in a double, or maybe that's a strategy?  Would have to draw
 ;;; immediately!
 
-(defn grow-initial-train [player-state engine]
+(defn OLD-grow-initial-train [player-state engine]
   (let [fin? (fn [st] (empty? (get st (peek (:train st)))))
         expand-st (fn [st]
                     (let [end (peek (:train st))
@@ -256,21 +262,66 @@
           (apply max-key #(count (:train %)) finished1)
           (recur working1 finished1))))))
 
-  
 
-(defn satisfy [game player unsat-train]
-  (let [targ (nth (:tail game) unsat-train)]
+;; pull out playing one dom
+;; refactor so same logic is growing initial and choosing single tile
+
+(defn extend-train [player-state dom]
+  (let [end (peek (:train player-state))]
+    (assert (match-pips end dom))
+    (-> player-state
+        (update (pips dom) disj dom)
+        (update (pips2 dom) disj dom)
+        (update :train conj end (opips dom end)))))
+
+;; Keep orig train, don't truncate, just offset from old train
+;; so you can reuse logic for initial growth and single play 
+
+(defn best-extension-state [player-state]
+  (let [fin? (fn [st] (empty? (get st (peek (:train st)))))
+        expand-st (fn [st]
+                    (let [end (peek (:train st))
+                          doms (get st end)]
+                      (map #(extend-train st %) doms)))]
+    (loop [working [player-state] finished nil]
+      (let [finished1 (into finished (filter fin?) working)
+            working1 (mapcat expand-st (remove fin? working))]
+        (if (empty? working1)
+          (apply max-key #(count (:train %)) finished1)
+          (recur working1 finished1))))))
+
+(defn best-play [player-state]
+  (let [orig-train-cnt (count (:train player-state))
+        best-ext-st (best-extension-state player-state)
+        best-train (:train best-ext-st)]
+    (when (and best-train (> (count best-train) orig-train-cnt))
+      (dom (nth best-train orig-train-cnt) (nth best-train (inc orig-train-cnt))))))
+
+
+(defn grow-initial-train [player-state engine]
+  (best-extension-state (assoc player-state :train [engine])))
+
+
+
+
+(defn satisfy-doubles [game]
     ;; find a tile matching targ
     ;; play it on that train
     ;; or draw, maybe play or give up
     ;; on to next player
     ;; UNFINISHED
-    game))
+    game)
 
-(defn normal-play [game player]
-  (let [possible-trains (into #{player} (filter (:public game))
-                              (range (inc (:num-players game))))
-        possible-tails nil]
+(defn normal-play [game]
+  (let [player (:nex-player game)
+        public-train-hands (sequence (comp (remove #{player}) (map game) (filter :public))
+                                     (range 1 (inc (:num-players game))))
+        hand (get game player)
+        end (peek (:train hand))
+        doms (get hand end)]
+
+    ;; rewrite to use same logic as grow-initial-train but only take first of longest train.
+    
     ;; UNFINISHED
     ;; pick best tile to play on best train
     ;; or draw if no
@@ -278,24 +329,17 @@
     ))
     
 
-(defn run-game []
-  (loop [game (loop [g (init-game 4)] (if (engine g) g (find-start g)))]
-    (if (:winner game)
-      game
-      (let [p (:next-player game)]
-        (if-let [unsat (:unsatisfied game)]
-          (satisfy game p unsat)
-          (if (nil? (nth (:tail game) p))
-            (initial-train game p)
-            (normal-play game p)))))))
+(defn score-round [game]
+  (reduce (fn [g p] (assoc-in g [p :score] (hand-pips (get g p))))
+          game
+          (range 1 (inc (:num-players game)))))
+
+(defn run-round []
+  (loop [game (-> (init-game 4) assign-engine)]
+    (cond (:winner game) (score-round game)
+          (:unsatisfied game) (recur (satisfy-doubles game))
+          :else (normal-play game))))
             
-
-
-(defn make-train [train hand]
-  ;; use alpha-beta search through space of hand
-  ;; return vector of unused hand in final position
-  )
-
 
 
 
