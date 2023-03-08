@@ -166,35 +166,6 @@
       (update (pips2 domino) disj domino)))
       
 
-(defn init-game
-  ([] (init-game 4))
-  ([num-players]
-   (assert (> num-players 1))
-   (let [high 12
-         all-doms (gen-domino-ints high)
-         count-doms (count all-doms)
-         hand-size (long (/ (* 0.7 count-doms) num-players))
-         shuffled (shuffle all-doms)
-         to-be-dealt (* num-players hand-size)
-         _ (assert (< to-be-dealt count-doms))
-         bone-yard (vec (drop to-be-dealt shuffled))
-         hands (sequence (comp (take to-be-dealt)
-                               (partition-all hand-size))
-                         shuffled)
-         players (mapv #(reduce dom-conj (empty-hand high) %) hands)]
-
-     (reduce (fn [st n] (assoc-in st [n :player] n))
-             (merge (zipmap (range 1 (inc num-players)) players)
-                    {:mexican {:player :mexican :public true :unsatisifed false :train nil}
-                     :high-pips high
-                     :next-player 1
-                     :unsatisfied nil
-                     :winner nil
-                     :num-players num-players
-                     :bone-yard bone-yard})
-             (range 1 (inc num-players))))))
-
-
 
 (defn hand-doms [player-state]
   (sort (map pipv (into #{} (mapcat player-state) (range 13)))))
@@ -225,7 +196,38 @@
           (recur (-> game
                      (update :bone-yard pop)
                      (update player dom-conj draw)
-                     (inc-next-player))))))))
+                     inc-next-player)))))))
+
+;;; really init-round -- need to keep score and next-player across multiple rounds
+
+(defn init-game
+  ([] (init-game 4))
+  ([num-players]
+   (assert (> num-players 1))
+   (let [high 12
+         all-doms (gen-domino-ints high)
+         count-doms (count all-doms)
+         hand-size (long (/ (* 0.7 count-doms) num-players))
+         shuffled (shuffle all-doms)
+         to-be-dealt (* num-players hand-size)
+         _ (assert (< to-be-dealt count-doms))
+         bone-yard (vec (drop to-be-dealt shuffled))
+         hands (sequence (comp (take to-be-dealt)
+                               (partition-all hand-size))
+                         shuffled)
+         players (mapv #(reduce dom-conj (empty-hand high) %) hands)]
+
+     (assign-engine
+      (reduce (fn [st n] (assoc-in st [n :player] n))
+              (merge (zipmap (range 1 (inc num-players)) players)
+                     {:mexican {:player :mexican :public true :unsatisifed false :train nil}
+                      :high-pips high
+                      :next-player 1
+                      :unsatisfied nil
+                      :winner nil
+                      :num-players num-players
+                      :bone-yard bone-yard})
+              (range 1 (inc num-players)))))))
 
 
 (defn print-game [game]
@@ -239,29 +241,6 @@
   (println))
 
 
-;;; maybe start should have been pre-inserted in :train so you don't have to do it here?
-;;; maybe doms need to be sorted so you get most pips in initial train?
-;;; probably shouldn't end in a double, or maybe that's a strategy?  Would have to draw
-;;; immediately!
-
-(defn OLD-grow-initial-train [player-state engine]
-  (let [fin? (fn [st] (empty? (get st (peek (:train st)))))
-        expand-st (fn [st]
-                    (let [end (peek (:train st))
-                          doms (get st end)]
-                      (map (fn [dom]
-                             (-> st
-                                 (update (pips dom) disj dom)
-                                 (update (pips2 dom) disj dom)
-                                 (update :train conj end (opips dom end))))
-                           doms)))]
-    (loop [working [(assoc player-state :train [engine])] finished nil]
-      (let [finished1 (into finished (filter fin?) working)
-            working1 (mapcat expand-st (remove fin? working))]
-        (if (empty? working1)
-          (apply max-key #(count (:train %)) finished1)
-          (recur working1 finished1))))))
-
 
 ;; pull out playing one dom
 ;; refactor so same logic is growing initial and choosing single tile
@@ -273,6 +252,14 @@
         (update (pips dom) disj dom)
         (update (pips2 dom) disj dom)
         (update :train conj end (opips dom end)))))
+
+(defn extend-other-train [game player other-player dom]
+  (let [end (peek (:train (game other-player)))]
+    (assert (match-pips end dom))
+    (-> game
+        (update-in [player (pips dom)] disj dom)
+        (update-in [player (pips2 dom)] disj dom)
+        (update-in [other-player :train] conj end (opips dom end)))))
 
 ;; Keep orig train, don't truncate, just offset from old train
 ;; so you can reuse logic for initial growth and single play 
@@ -298,6 +285,11 @@
       (dom (nth best-train orig-train-cnt) (nth best-train (inc orig-train-cnt))))))
 
 
+;;; maybe start should have been pre-inserted in :train so you don't have to do it here?
+;;; maybe doms need to be sorted so you get most pips in initial train?
+;;; probably shouldn't end in a double, or maybe that's a strategy?  Would have to draw
+;;; immediately!
+
 (defn grow-initial-train [player-state engine]
   (best-extension-state (assoc player-state :train [engine])))
 
@@ -312,22 +304,62 @@
     ;; UNFINISHED
     game)
 
-(defn normal-play [game]
-  (let [player (:nex-player game)
-        public-train-hands (sequence (comp (remove #{player}) (map game) (filter :public))
-                                     (range 1 (inc (:num-players game))))
+;; FIXME -- need to check for winner after every tile play including satisfying double
+
+(defn try-play-other [game player target]
+  (when (not= player target)
+    (let [targ (game target)
+          hand (game player)]
+      (when (:public targ)
+        (let [end (peek (:train (game target)))]
+          (when-let [dom (first (hand end))]
+            (-> game
+                (extend-other-train player target dom)
+                inc-next-player)))))))
+
+(defn try-play-other-dom [game player target dom]
+  (when (and (not= player target) (:public (game target))
+             (match-pips (peek (:train (game target))) dom))
+    (-> game
+        (extend-other-train player target dom)
+        inc-next-player)))
+
+
+(defn play-one [game]
+  (let [player (:next-player game)
+        eng (engine game)
         hand (get game player)
-        end (peek (:train hand))
-        doms (get hand end)]
+        dom (best-play hand)]
+    (if dom
+      (-> game
+          (update player extend-train dom)
+          inc-next-player)
+      (let [players (conj (range 1 (inc (:num-players game))) :mexican)]
+      (if-let [g1 (first (keep #(try-play-other game player %) players))]
+        g1
+        ;; draw a tile and try again
+        (let [draw (peek (:bone-yard game))
+              g2 (update game :bone-yard pop)
+              g3 (first (keep #(try-play-other-dom g2 player % draw) players))]
+          (or g3
+              ;; failed to play tile after draw
+              (-> g2
+                  (assoc-in [player :public] true)
+                  (update player dom-conj draw)
+                  inc-next-player))))))))
 
-    ;; rewrite to use same logic as grow-initial-train but only take first of longest train.
-    
-    ;; UNFINISHED
-    ;; pick best tile to play on best train
-    ;; or draw if no
 
-    ))
-    
+;; assume tiles dealt and engine selected
+(defn normal-play [game]
+  (let [player (:next-player game)
+        hand (get game player)]
+    (if-let [end (peek (:train hand))]
+      (play-one game)
+      (let [g1 (assoc game player (grow-initial-train (get game player) (engine game)))]
+        (if (= (count (:train (g1 player))) 1)
+          (play-one g1)
+          (inc-next-player g1))))))
+
 
 (defn score-round [game]
   (reduce (fn [g p] (assoc-in g [p :score] (hand-pips (get g p))))
@@ -335,7 +367,7 @@
           (range 1 (inc (:num-players game)))))
 
 (defn run-round []
-  (loop [game (-> (init-game 4) assign-engine)]
+  (loop [game (init-game 4)]
     (cond (:winner game) (score-round game)
           (:unsatisfied game) (recur (satisfy-doubles game))
           :else (normal-play game))))
