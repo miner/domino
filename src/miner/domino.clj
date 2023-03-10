@@ -101,7 +101,7 @@
 ;;; player-state is map
 ;;; :player N
 ;;; :public T/F
-;;; :unsatisfied T/F
+;;; :unsatisfied nil or player/train num
 ;;; :train  [ENGINE]   later, [ENGINE engine pips pips x x y ...]
 ;;;    vector, ENGINE comes from game initial DOUBLE
 ;;;    peek is pips to match
@@ -114,8 +114,9 @@
 ;;; pips per domino so peek always is the next to match.  Double ending is easy to check.
 ;;;
 ;;; also better to keep all player info within hand map of 0..N to doms (double entry map).
-;;; Just add non-int keys for :player N, :public true/false, :unsatisfied true/false within
-;;; same map.
+;;; Just add non-int keys for :player N, :public true/false
+;;;
+;;; :unsatisfied is in the top-level pointing to the player/:mexican who is unsatified double.
 ;;;
 ;;; Finding initial train is loop of trying to add dom, by end, adding one each to train
 ;;; into working set and keep adding until you can't, then move stat to `finished` list.  At
@@ -138,6 +139,8 @@
 ;;; For now, I'm saying if you draw, you can only play that one tile.  And you never get another
 ;;; chance to start multi-train -- except if you're forced to satisfy someone else's double.
 
+;;; NEW IDEA: draw should temporarily put dom in player hand :draw and not change
+;;; :next-player.  Then normal play should look for a :draw and use it or store it in hand.
 
 ;;; when center "engine" C:C is established all trains are initialized with tail C
 ;;; We use the :mexican :train as the standard
@@ -152,8 +155,7 @@
   (assoc (zipmap (range (inc high))
                  (repeat #{}))
          :train nil
-         :public false
-         :unsatisfied false))
+         :public false))
 
 (defn dom-conj [hand domino]
   (-> hand
@@ -175,6 +177,44 @@
 
 (defn max-double [hand high]
   (first (keep dub-pips (mapcat hand (range high -1 -1)))))
+
+;; lazy
+(defn hand-double-doms [hand]
+  (filter dub-pips (mapcat hand (filter number? (keys hand)))))
+
+;; eager
+(defn hand-double-doms2 [hand]
+  (reduce-kv (fn [dubs k v]
+               (if (number? k)
+                 (into dubs (filter dub-pips) (hand k))
+                 dubs))
+             nil
+             hand))
+;; lazy
+(defn hand-double-doms3 [hand]
+  (sequence (comp (filter number?) (mapcat hand) (filter dub-pips))
+            (keys hand)))
+
+(defn hand-double-doms31 [hand]
+  (sequence (comp (filter number?) (mapcat hand) (filter dub-pips))
+            (range 12 -1 -1)))
+
+(defn hand-double-doms4 [hand]
+  (into [] (comp (filter number?) (mapcat hand) (filter dub-pips))
+            (keys hand)))
+
+
+(defn hand-sat-double-doms [hand]
+  (reduce-kv (fn [dubs k v]
+               (if (number? k)
+                 (if-let [doms (hand k)]
+                   (if (> (count doms) 1)
+                     (into dubs (filter dub-pips) doms)
+                     dubs)
+                   dubs)
+                 dubs))
+             nil
+             hand))
 
 ;;; player 0 is the mexican train, 1-N are normal players
 (defn inc-next-player [game]
@@ -220,7 +260,7 @@
      (assign-engine
       (reduce (fn [st n] (assoc-in st [n :player] n))
               (merge (zipmap (range 1 (inc num-players)) players)
-                     {:mexican {:player :mexican :public true :unsatisifed false :train nil}
+                     {:mexican {:player :mexican :public true :train nil}
                       :high-pips high
                       :next-player 1
                       :unsatisfied nil
@@ -261,6 +301,35 @@
         (update-in [player (pips2 dom)] disj dom)
         (update-in [other-player :train] conj end (opips dom end)))))
 
+
+;;; Better idea -- every possible move should be written as a function of game state
+;;; returning the new game state or nil if move isn't possible.
+
+(defn draw-tile [game]
+  (assert (not (:draw game)))
+  (-> game
+      (assoc :draw (peek (:bone-yard game)))
+      (update :bone-yard pop)))
+
+
+(defn try-extend-other-train [game player other-player dom]
+  (let [end (peek (:train (game other-player)))]
+    (when (match-pips end dom)
+      (-> game
+          (update-in [player (pips dom)] disj dom)
+          (update-in [player (pips2 dom)] disj dom)
+          (update-in [other-player :train] conj end (opips dom end))
+          (cond-> (dub-pips dom) (assoc :unsatisfied other-player)
+                  (= player other-player) (assoc-in [player :public] false))))))
+;;; could check :public and only change when already true
+;;; could specialize version for drawn tile, no need to disj from hand
+
+;; returns nil if it doesn't work, new game state if successful
+(defn try-extend-train [game player dom]
+  (try-extend-other-train game player player dom))
+
+
+
 ;; Keep orig train, don't truncate, just offset from old train
 ;; so you can reuse logic for initial growth and single play 
 
@@ -276,6 +345,9 @@
         (if (empty? working1)
           (apply max-key #(count (:train %)) finished1)
           (recur working1 finished1))))))
+
+;;; FIXME best play is actually to play a double that you can satisfy!
+
 
 (defn best-play [player-state]
   (let [orig-train-cnt (count (:train player-state))
@@ -372,6 +444,11 @@
           (:unsatisfied game) (recur (satisfy-doubles game))
           :else (normal-play game))))
             
+(defn gtest
+  ([g] (gtest g 10))
+  ([g limit]
+   (doseq [x (take limit (iterate normal-play g))]
+     (print-game x))))
 
 
 
